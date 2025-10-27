@@ -1,9 +1,36 @@
 # app.py
 import streamlit as st
+import sys
+import os
+
+# PATCH para Python 3.13+ - Antes de importar speech_recognition
+try:
+    import aifc
+except ImportError:
+    # Crear mock de aifc
+    from types import ModuleType
+    aifc = ModuleType('aifc')
+    class Error(Exception): pass
+    aifc.Error = Error
+    aifc.open = lambda *args, **kwargs: None
+    sys.modules['aifc'] = aifc
+
+try:
+    import audioop
+except ImportError:
+    # Crear mock de audioop
+    from types import ModuleType
+    audioop = ModuleType('audioop')
+    # Funciones básicas que speech_recognition necesita
+    audioop.ratecv = lambda *args: (args[0], None)
+    audioop.lin2ulaw = lambda fragment, width: fragment
+    audioop.ulaw2lin = lambda fragment, width: fragment
+    sys.modules['audioop'] = audioop
+
+# Ahora importar speech_recognition
 import speech_recognition as sr
 from pydub import AudioSegment
 import tempfile
-import os
 import io
 import zipfile
 from datetime import datetime
@@ -40,8 +67,7 @@ def convert_to_wav(file_path):
         
         audio.export(
             wav_path, 
-            format='wav',
-            parameters=["-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le"]
+            format='wav'
         )
         
         return wav_path
@@ -231,7 +257,8 @@ def process_files(uploaded_files, language):
             results.append(trans_data)
             
             # Limpiar archivo temporal
-            os.unlink(audio_path)
+            if os.path.exists(audio_path):
+                os.unlink(audio_path)
             
         except Exception as e:
             error_trans = {
