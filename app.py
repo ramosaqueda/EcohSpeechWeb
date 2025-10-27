@@ -52,10 +52,48 @@ def get_recognizer():
     """Cache del reconocedor para mejor performance"""
     return sr.Recognizer()
 
+def convert_opus_to_wav(file_path):
+    """Conversión especial para archivos OPUS de WhatsApp"""
+    try:
+        # Para OPUS necesitamos usar ffmpeg directamente
+        import subprocess
+        import os
+        
+        wav_path = file_path + '.wav'
+        
+        # Convertir usando ffmpeg (que sí soporta OPUS)
+        cmd = [
+            'ffmpeg', '-i', file_path,
+            '-ac', '1',           # Mono
+            '-ar', '16000',       # 16kHz
+            '-acodec', 'pcm_s16le', # 16-bit PCM
+            '-y',                 # Sobrescribir si existe
+            wav_path
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0 and os.path.exists(wav_path):
+            return wav_path
+        else:
+            st.error(f"Error ffmpeg: {result.stderr}")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error convirtiendo OPUS: {str(e)}")
+        return None
+
 def convert_to_wav(file_path):
     """Convertir archivo a WAV optimizado para transcripción"""
     try:
-        # Cargar audio
+        # Detectar formato
+        file_extension = file_path.lower().split('.')[-1]
+        
+        # Si es OPUS, usar conversión especial
+        if file_extension == 'opus':
+            return convert_opus_to_wav(file_path)
+        
+        # Para otros formatos, usar pydub normal
         audio = AudioSegment.from_file(file_path)
         
         # Crear archivo temporal WAV
@@ -168,9 +206,10 @@ def main():
         st.markdown("---")
         st.header("💡 Tips")
         st.info("""
-        - Formatos soportados: MP3, WAV, M4A, OGG, FLAC
-        - Audio claro = Mejor transcripción
-        - Máximo ~10MB por archivo
+        - ✅ **Formatos soportados:** MP3, WAV, M4A, OGG, FLAC, OPUS
+        - 🎧 **Audio claro** = Mejor transcripción
+        - 📱 **Audios de WhatsApp:** Ahora compatibles
+        - ⚠️ **Máximo:** ~10MB por archivo
         """)
     
     # Área principal
@@ -181,19 +220,26 @@ def main():
         
         uploaded_files = st.file_uploader(
             "Arrastra o selecciona archivos de audio",
-            type=['mp3', 'wav', 'm4a', 'ogg', 'flac'],
+            type=['mp3', 'wav', 'm4a', 'ogg', 'flac', 'opus'],  # ¡AGREGADO OPUS!
             accept_multiple_files=True,
-            help="Puedes seleccionar múltiples archivos a la vez"
+            help="Puedes seleccionar múltiples archivos a la vez. Soporta audios de WhatsApp (.opus)"
         )
         
         if uploaded_files:
+            # Contar tipos de archivo
+            opus_files = [f for f in uploaded_files if f.name.lower().endswith('.opus')]
+            other_files = [f for f in uploaded_files if not f.name.lower().endswith('.opus')]
+            
             st.success(f"✅ {len(uploaded_files)} archivo(s) listo(s) para procesar")
+            if opus_files:
+                st.info(f"📱 {len(opus_files)} audio(s) de WhatsApp detectado(s)")
             
             # Mostrar preview de archivos
             with st.expander("📋 Ver archivos cargados", expanded=True):
                 for file in uploaded_files:
                     file_size = file.size / (1024 * 1024)  # MB
-                    st.write(f"• **{file.name}** ({file_size:.2f} MB)")
+                    file_icon = "📱" if file.name.lower().endswith('.opus') else "🎵"
+                    st.write(f"{file_icon} **{file.name}** ({file_size:.2f} MB)")
     
     with col2:
         st.subheader("🎯 Acciones")
@@ -234,7 +280,9 @@ def process_files(uploaded_files, language):
         # Actualizar progreso
         progress = (i + 1) / len(uploaded_files)
         progress_bar.progress(progress)
-        status_text.text(f"🔍 Procesando: {uploaded_file.name} ({i+1}/{len(uploaded_files)})")
+        
+        file_icon = "📱" if uploaded_file.name.lower().endswith('.opus') else "🎵"
+        status_text.text(f"{file_icon} Procesando: {uploaded_file.name} ({i+1}/{len(uploaded_files)})")
         
         try:
             # Guardar archivo temporal
@@ -280,10 +328,11 @@ def process_files(uploaded_files, language):
             st.success(f"✅ {successful} de {len(uploaded_files)} transcripciones exitosas!")
         
         for i, result in enumerate(results):
-            # Icono según resultado
-            icon = "✅" if not result['transcription'].startswith('❌') else "❌"
+            # Icono según resultado y tipo de archivo
+            file_icon = "📱" if result['filename'].lower().endswith('.opus') else "🎵"
+            status_icon = "✅" if not result['transcription'].startswith('❌') else "❌"
             
-            with st.expander(f"{icon} {result['filename']}", expanded=(i == 0)):
+            with st.expander(f"{file_icon} {status_icon} {result['filename']}", expanded=(i == 0)):
                 st.text_area(
                     "Transcripción:", 
                     result['transcription'], 
