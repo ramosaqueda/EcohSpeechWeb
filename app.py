@@ -30,10 +30,11 @@ import io
 import zipfile
 from datetime import datetime
 import subprocess
+import wave
 
 # Configuración
 st.set_page_config(
-    page_title="EcohSpeech Web",
+    page_title="EcohSpeech Web - Debug",
     page_icon="🎤",
     layout="wide"
 )
@@ -41,6 +42,8 @@ st.set_page_config(
 def init_session_state():
     if 'transcriptions' not in st.session_state:
         st.session_state.transcriptions = []
+    if 'debug_wavs' not in st.session_state:
+        st.session_state.debug_wavs = {}
 
 @st.cache_resource
 def get_recognizer():
@@ -56,209 +59,379 @@ def check_ffmpeg():
     except:
         return False
 
-def convert_to_wav_robust(file_path, filename):
-    """
-    Convertir a WAV con múltiples estrategias para archivos problemáticos
-    Especialmente diseñado para archivos de WhatsApp y Opus/OGG corruptos
-    """
-    wav_fd, wav_path = tempfile.mkstemp(suffix='.wav')
+def verify_wav_file(wav_path):
+    """Verificar que el WAV es válido y tiene contenido"""
+    try:
+        with wave.open(wav_path, 'rb') as wav_file:
+            n_channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            framerate = wav_file.getframerate()
+            n_frames = wav_file.getnframes()
+            
+            duration = n_frames / float(framerate)
+            
+            info = {
+                'valid': True,
+                'channels': n_channels,
+                'sample_width': sample_width,
+                'framerate': framerate,
+                'frames': n_frames,
+                'duration': duration,
+                'size': os.path.getsize(wav_path)
+            }
+            
+            st.info(f"""
+            📊 **Información del WAV generado:**
+            - Canales: {n_channels} {'✅' if n_channels == 1 else '⚠️ (debería ser 1)'}
+            - Sample Rate: {framerate} Hz {'✅' if framerate == 16000 else '⚠️ (debería ser 16000)'}
+            - Duración: {duration:.2f} segundos
+            - Frames: {n_frames:,}
+            - Tamaño: {info['size'] / 1024:.1f} KB
+            """)
+            
+            if duration < 0.1:
+                st.warning("⚠️ Audio muy corto (< 0.1s) - puede no tener contenido")
+                info['valid'] = False
+            
+            if n_frames < 100:
+                st.warning("⚠️ Muy pocos frames - audio probablemente vacío")
+                info['valid'] = False
+            
+            return info
+            
+    except Exception as e:
+        st.error(f"❌ Error verificando WAV: {str(e)}")
+        return {'valid': False, 'error': str(e)}
+
+def convert_to_wav_debug(file_path, filename):
+    """Convertir a WAV con máximo debug y múltiples estrategias"""
+    
+    st.markdown("### 🔄 Proceso de Conversión")
+    
+    # Información del archivo original
+    original_size = os.path.getsize(file_path) / 1024
+    st.write(f"📁 **Archivo original:** {original_size:.1f} KB")
+    
+    wav_fd, wav_path = tempfile.mkstemp(suffix='.wav', prefix='ecoh_debug_')
     os.close(wav_fd)
     
-    # Detectar si es archivo de WhatsApp
     is_whatsapp = 'PTT-' in filename or 'WA' in filename or 'AUD-' in filename
     is_opus = filename.lower().endswith(('.opus', '.ogg', '.oga'))
     
+    st.write(f"🔍 **Tipo detectado:** {'📱 WhatsApp' if is_whatsapp else ''} {'🎵 Opus/OGG' if is_opus else ''}")
+    
     strategies = []
     
-    # ESTRATEGIA 1: FFmpeg directo con parámetros permisivos (para Opus/OGG problemáticos)
+    # Estrategia 1: FFmpeg ultra-permisivo
     if is_opus or is_whatsapp:
         strategies.append({
-            'name': 'FFmpeg permisivo (Opus/OGG)',
+            'name': '🔧 FFmpeg Ultra-Permisivo (Opus/WhatsApp)',
             'cmd': [
                 'ffmpeg', '-y',
-                '-err_detect', 'ignore_err',  # Ignorar errores de decodificación
-                '-fflags', '+genpts+igndts',  # Generar timestamps
-                '-analyzeduration', '10M',    # Más tiempo para analizar
-                '-probesize', '10M',          # Más datos para detectar formato
+                '-loglevel', 'warning',
+                '-err_detect', 'ignore_err',
+                '-fflags', '+genpts+igndts',
+                '-analyzeduration', '100M',
+                '-probesize', '50M',
                 '-i', file_path,
-                '-ar', '16000',               # 16kHz
-                '-ac', '1',                   # Mono
-                '-sample_fmt', 's16',         # 16-bit
-                '-acodec', 'pcm_s16le',       # PCM sin compresión
+                '-vn',  # Sin video
+                '-ar', '16000',
+                '-ac', '1',
+                '-sample_fmt', 's16',
+                '-acodec', 'pcm_s16le',
+                '-f', 'wav',
                 wav_path
             ]
         })
     
-    # ESTRATEGIA 2: Pydub con parámetros específicos
+    # Estrategia 2: FFmpeg con auto-detección
     strategies.append({
-        'name': 'Pydub con parámetros',
-        'pydub': True,
-        'params': {'format': 'ogg'} if is_opus else {}
-    })
-    
-    # ESTRATEGIA 3: FFmpeg con conversión forzada a raw PCM primero
-    if is_opus:
-        strategies.append({
-            'name': 'FFmpeg vía PCM raw',
-            'two_step': True
-        })
-    
-    # ESTRATEGIA 4: FFmpeg estándar
-    strategies.append({
-        'name': 'FFmpeg estándar',
+        'name': '🔧 FFmpeg Auto-detect',
         'cmd': [
             'ffmpeg', '-y',
+            '-loglevel', 'warning',
             '-i', file_path,
             '-ar', '16000',
             '-ac', '1',
+            '-acodec', 'pcm_s16le',
             wav_path
         ]
     })
     
+    # Estrategia 3: Pydub
+    strategies.append({
+        'name': '🐍 Pydub',
+        'pydub': True
+    })
+    
+    # Estrategia 4: FFmpeg a raw PCM primero
+    strategies.append({
+        'name': '🔧 FFmpeg vía PCM Raw',
+        'two_step': True
+    })
+    
     # Intentar cada estrategia
     for i, strategy in enumerate(strategies, 1):
-        try:
-            st.info(f"🔄 Intento {i}/{len(strategies)}: {strategy['name']}")
-            
-            # Estrategia Pydub
-            if strategy.get('pydub'):
-                audio = AudioSegment.from_file(file_path, **strategy.get('params', {}))
-                audio = audio.set_frame_rate(16000).set_channels(1).normalize()
-                audio.export(wav_path, format='wav')
+        with st.expander(f"Intento {i}/{len(strategies)}: {strategy['name']}", expanded=True):
+            try:
+                st.write("⏳ Procesando...")
                 
-                # Verificar que el archivo se creó
-                if os.path.exists(wav_path) and os.path.getsize(wav_path) > 1000:
-                    st.success(f"✅ Conversión exitosa con: {strategy['name']}")
-                    return wav_path
-            
-            # Estrategia dos pasos (raw PCM)
-            elif strategy.get('two_step'):
-                # Paso 1: A raw PCM
-                raw_fd, raw_path = tempfile.mkstemp(suffix='.raw')
-                os.close(raw_fd)
+                # Pydub
+                if strategy.get('pydub'):
+                    try:
+                        audio = AudioSegment.from_file(file_path)
+                        st.write(f"✅ Audio cargado: {len(audio)}ms, {audio.frame_rate}Hz, {audio.channels} canales")
+                        
+                        # Optimizar
+                        audio = audio.set_frame_rate(16000)
+                        audio = audio.set_channels(1)
+                        audio = audio.normalize()
+                        
+                        # Exportar
+                        audio.export(wav_path, format='wav', parameters=["-ar", "16000", "-ac", "1"])
+                        
+                        # Verificar
+                        if os.path.exists(wav_path) and os.path.getsize(wav_path) > 1000:
+                            info = verify_wav_file(wav_path)
+                            if info['valid']:
+                                st.success(f"✅ ¡Conversión exitosa con {strategy['name']}!")
+                                return wav_path
+                    except Exception as e:
+                        st.warning(f"⚠️ Pydub falló: {str(e)}")
+                        continue
                 
-                cmd1 = [
-                    'ffmpeg', '-y',
-                    '-err_detect', 'ignore_err',
-                    '-i', file_path,
-                    '-f', 's16le',
-                    '-ar', '16000',
-                    '-ac', '1',
-                    raw_path
-                ]
-                
-                result1 = subprocess.run(cmd1, capture_output=True, timeout=30)
-                
-                if result1.returncode == 0 and os.path.getsize(raw_path) > 1000:
-                    # Paso 2: Raw PCM a WAV
-                    cmd2 = [
-                        'ffmpeg', '-y',
-                        '-f', 's16le',
-                        '-ar', '16000',
-                        '-ac', '1',
-                        '-i', raw_path,
-                        wav_path
-                    ]
+                # Dos pasos (raw PCM)
+                elif strategy.get('two_step'):
+                    raw_fd, raw_path = tempfile.mkstemp(suffix='.raw')
+                    os.close(raw_fd)
                     
-                    result2 = subprocess.run(cmd2, capture_output=True, timeout=30)
+                    try:
+                        # Paso 1: A raw
+                        cmd1 = [
+                            'ffmpeg', '-y',
+                            '-loglevel', 'error',
+                            '-err_detect', 'ignore_err',
+                            '-i', file_path,
+                            '-f', 's16le',
+                            '-ar', '16000',
+                            '-ac', '1',
+                            raw_path
+                        ]
+                        
+                        result1 = subprocess.run(cmd1, capture_output=True, text=True, timeout=30)
+                        
+                        if result1.returncode == 0 and os.path.getsize(raw_path) > 100:
+                            st.write(f"✅ Paso 1: Raw PCM creado ({os.path.getsize(raw_path)/1024:.1f} KB)")
+                            
+                            # Paso 2: Raw a WAV
+                            cmd2 = [
+                                'ffmpeg', '-y',
+                                '-f', 's16le',
+                                '-ar', '16000',
+                                '-ac', '1',
+                                '-i', raw_path,
+                                wav_path
+                            ]
+                            
+                            result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=30)
+                            
+                            if result2.returncode == 0 and os.path.getsize(wav_path) > 1000:
+                                info = verify_wav_file(wav_path)
+                                if info['valid']:
+                                    st.success(f"✅ ¡Conversión exitosa con {strategy['name']}!")
+                                    return wav_path
+                        else:
+                            if result1.stderr:
+                                st.error(f"Error paso 1: {result1.stderr}")
                     
-                    # Limpiar raw
-                    if os.path.exists(raw_path):
-                        os.unlink(raw_path)
-                    
-                    if result2.returncode == 0 and os.path.getsize(wav_path) > 1000:
-                        st.success(f"✅ Conversión exitosa con: {strategy['name']}")
-                        return wav_path
-            
-            # Estrategia FFmpeg directo
-            elif 'cmd' in strategy:
-                result = subprocess.run(
-                    strategy['cmd'],
-                    capture_output=True,
-                    timeout=30,
-                    text=True
-                )
+                    finally:
+                        if os.path.exists(raw_path):
+                            os.unlink(raw_path)
                 
-                # Verificar éxito
-                if result.returncode == 0 and os.path.exists(wav_path) and os.path.getsize(wav_path) > 1000:
-                    st.success(f"✅ Conversión exitosa con: {strategy['name']}")
-                    return wav_path
-                else:
-                    # Mostrar error solo en modo debug
+                # FFmpeg directo
+                elif 'cmd' in strategy:
+                    result = subprocess.run(
+                        strategy['cmd'],
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    
+                    if result.returncode == 0:
+                        if os.path.exists(wav_path) and os.path.getsize(wav_path) > 1000:
+                            st.write(f"✅ FFmpeg completado, verificando...")
+                            info = verify_wav_file(wav_path)
+                            
+                            if info['valid']:
+                                st.success(f"✅ ¡Conversión exitosa con {strategy['name']}!")
+                                return wav_path
+                            else:
+                                st.warning("⚠️ WAV generado pero sin contenido válido")
+                        else:
+                            st.warning("⚠️ WAV no generado o muy pequeño")
+                    
                     if result.stderr:
-                        with st.expander(f"⚠️ Error en {strategy['name']}", expanded=False):
-                            st.code(result.stderr[-500:], language='text')
-        
-        except Exception as e:
-            st.warning(f"⚠️ {strategy['name']} falló: {str(e)[:100]}")
-            continue
+                        st.code(result.stderr[-300:], language='text')
+            
+            except subprocess.TimeoutExpired:
+                st.error("⏱️ Timeout - archivo muy grande o proceso bloqueado")
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
+                continue
     
-    # Si todas las estrategias fallaron
+    # Si todo falló
     if os.path.exists(wav_path):
         os.unlink(wav_path)
     
     raise Exception(
-        "No se pudo convertir el archivo después de múltiples intentos. "
-        "Posibles causas:\n"
-        "• Archivo corrupto o incompleto\n"
-        "• Formato no estándar (ej: WhatsApp con encriptación)\n"
-        "• Codec no soportado\n\n"
-        "💡 Sugerencias:\n"
-        "• Intenta reproducir el audio en tu teléfono primero\n"
-        "• Reenvía el audio (sin reenviar como documento)\n"
-        "• Convierte manualmente a MP3 o WAV antes de subir"
+        "❌ **No se pudo convertir el archivo después de 4 intentos**\n\n"
+        "**Posibles causas:**\n"
+        "1. Archivo corrupto o incompleto\n"
+        "2. Formato no estándar\n"
+        "3. Encriptación o protección\n"
+        "4. FFmpeg no instalado correctamente\n\n"
+        "**💡 Soluciones:**\n"
+        "- Reproduce el audio en tu dispositivo primero\n"
+        "- Convierte a MP3/WAV con otra herramienta\n"
+        "- Verifica que no esté protegido/encriptado"
     )
 
-def transcribe_audio(file_path, language, filename):
-    """Transcribir audio con manejo robusto"""
-    wav_path = None
+def test_recognizer():
+    """Probar que el reconocedor funciona"""
     try:
         recognizer = get_recognizer()
-        
-        # Convertir a WAV con estrategias robustas
-        st.info(f"🔄 Procesando: {filename}")
-        wav_path = convert_to_wav_robust(file_path, filename)
-        
-        # Verificar que el WAV es válido
-        if not wav_path or not os.path.exists(wav_path):
-            return "❌ No se pudo crear archivo WAV válido"
-        
-        file_size = os.path.getsize(wav_path) / 1024
-        st.info(f"📊 WAV creado: {file_size:.1f} KB")
-        
-        # Transcribir
-        with sr.AudioFile(wav_path) as source:
-            st.info("🎧 Ajustando ruido ambiente...")
-            recognizer.adjust_for_ambient_noise(source, duration=0.5)
-            
-            st.info("📖 Leyendo audio...")
-            audio_data = recognizer.record(source)
-            
-            st.info(f"🌐 Transcribiendo en {language}...")
-            text = recognizer.recognize_google(audio_data, language=language)
-        
-        if text:
-            st.success(f"✅ Transcrito: {len(text)} caracteres")
-        
-        return text
-        
-    except sr.UnknownValueError:
-        return "❌ No se pudo entender el audio.\n\n💡 Consejos:\n• Verifica que haya voz clara\n• Reduce ruido de fondo\n• Confirma el idioma correcto"
-    
-    except sr.RequestError as e:
-        return f"❌ Error del servicio Google Speech:\n{str(e)}\n\n💡 Verifica tu conexión a internet"
-    
+        st.success(f"✅ SpeechRecognition inicializado correctamente")
+        st.write(f"- Versión: {sr.__version__}")
+        st.write(f"- Energy threshold: {recognizer.energy_threshold}")
+        return True
     except Exception as e:
-        error_msg = str(e)
-        if "after multiple" in error_msg:
-            return f"❌ {error_msg}"
-        return f"❌ Error: {error_msg}"
+        st.error(f"❌ Error inicializando reconocedor: {str(e)}")
+        return False
+
+def transcribe_audio(file_path, language, filename):
+    """Transcribir con máximo debug"""
+    wav_path = None
+    
+    try:
+        st.markdown("---")
+        st.markdown(f"## 🎤 Transcribiendo: {filename}")
+        
+        # Verificar recognizer
+        if not test_recognizer():
+            return "❌ Error: Reconocedor de voz no disponible"
+        
+        # Convertir a WAV
+        wav_path = convert_to_wav_debug(file_path, filename)
+        
+        if not wav_path or not os.path.exists(wav_path):
+            return "❌ Error: No se pudo crear WAV válido"
+        
+        # Guardar WAV para debug (permitir descarga)
+        with open(wav_path, 'rb') as f:
+            wav_bytes = f.read()
+            st.session_state.debug_wavs[filename] = wav_bytes
+            st.download_button(
+                "🔍 Descargar WAV convertido (para debug)",
+                wav_bytes,
+                f"debug_{filename}.wav",
+                "audio/wav",
+                key=f"debug_wav_{filename}"
+            )
+        
+        st.markdown("### 🎧 Transcribiendo con Google Speech API")
+        
+        recognizer = get_recognizer()
+        
+        # Ajustar parámetros
+        recognizer.energy_threshold = 300
+        recognizer.dynamic_energy_threshold = True
+        recognizer.pause_threshold = 0.8
+        
+        with sr.AudioFile(wav_path) as source:
+            st.write("📊 Analizando audio...")
+            
+            # Ajustar ruido
+            recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            st.write(f"✅ Umbral de energía ajustado a: {recognizer.energy_threshold}")
+            
+            # Leer audio
+            st.write("📖 Leyendo datos de audio...")
+            audio_data = recognizer.record(source)
+            st.write(f"✅ Audio leído: {len(audio_data.frame_data)} bytes")
+            
+            # Verificar que hay datos
+            if len(audio_data.frame_data) < 100:
+                return "❌ Error: Audio vacío o sin datos suficientes"
+            
+            # Transcribir
+            st.write(f"🌐 Enviando a Google Speech API (idioma: {language})...")
+            
+            try:
+                text = recognizer.recognize_google(
+                    audio_data, 
+                    language=language,
+                    show_all=False
+                )
+                
+                if text:
+                    st.success(f"✅ ¡Transcripción exitosa! ({len(text)} caracteres)")
+                    st.markdown("### 📝 Resultado:")
+                    st.info(text)
+                    return text
+                else:
+                    return "❌ La API devolvió respuesta vacía"
+                    
+            except sr.UnknownValueError:
+                st.warning("⚠️ Google Speech no pudo entender el audio")
+                
+                # Intentar con show_all para más info
+                try:
+                    st.write("🔍 Intentando obtener más información...")
+                    result = recognizer.recognize_google(audio_data, language=language, show_all=True)
+                    st.code(str(result))
+                except:
+                    pass
+                
+                return (
+                    "❌ **No se pudo entender el audio**\n\n"
+                    "**Posibles causas:**\n"
+                    "- No hay voz humana clara en el audio\n"
+                    "- Idioma seleccionado incorrecto\n"
+                    "- Mucho ruido de fondo\n"
+                    "- Audio de muy baja calidad\n\n"
+                    "**💡 Verifica:**\n"
+                    "- Descarga el WAV convertido (botón arriba) y escúchalo\n"
+                    "- Confirma que el idioma sea correcto\n"
+                    "- Prueba con un audio de prueba conocido"
+                )
+            
+            except sr.RequestError as e:
+                st.error(f"❌ Error de la API de Google: {str(e)}")
+                return (
+                    f"❌ **Error del servicio Google Speech:**\n{str(e)}\n\n"
+                    "**Posibles causas:**\n"
+                    "- Sin conexión a internet\n"
+                    "- Límite de uso excedido (100 peticiones/día gratis)\n"
+                    "- Servicio temporalmente no disponible\n\n"
+                    "**💡 Soluciones:**\n"
+                    "- Verifica tu conexión\n"
+                    "- Espera unas horas si excediste el límite\n"
+                    "- Considera usar la API oficial con key"
+                )
+        
+    except Exception as e:
+        st.error(f"❌ Error en transcripción: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
+        return f"❌ Error: {str(e)}"
     
     finally:
-        # Limpiar WAV temporal
+        # Limpiar WAV temporal (pero mantener copia para debug)
         if wav_path and os.path.exists(wav_path):
             try:
-                os.unlink(wav_path)
+                # No eliminar si está en debug_wavs
+                if filename not in st.session_state.debug_wavs:
+                    os.unlink(wav_path)
             except:
                 pass
 
@@ -284,18 +457,26 @@ Fecha: {trans['timestamp']}
     return zip_buffer
 
 def main():
-    st.title("🎤 EcohSpeech Web - Transcriptor Robusto")
-    st.caption("✨ Optimizado para archivos de WhatsApp y formatos problemáticos")
+    st.title("🎤 EcohSpeech Web - Modo Debug Completo")
+    st.caption("🔍 Versión con debugging extensivo para diagnosticar problemas")
     
     init_session_state()
     
     # Verificar FFmpeg
     ffmpeg_ok = check_ffmpeg()
-    if ffmpeg_ok:
-        st.success("✅ FFmpeg disponible - Soporte completo para Opus/OGG")
-    else:
-        st.error("❌ FFmpeg NO disponible - Archivos Opus/OGG no funcionarán")
-        st.info("📋 Agrega `packages.txt` con 'ffmpeg' y redespliega")
+    
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if ffmpeg_ok:
+            st.success("✅ FFmpeg disponible")
+        else:
+            st.error("❌ FFmpeg NO disponible")
+    
+    with col_b:
+        if test_recognizer():
+            st.success("✅ SpeechRecognition OK")
+        else:
+            st.error("❌ SpeechRecognition con problemas")
     
     st.markdown("---")
     
@@ -304,10 +485,18 @@ def main():
         st.header("⚙️ Configuración")
         
         language = st.selectbox(
-            "Idioma:",
-            ["es-CL", "es-ES", "es-MX", "en-US", "en-GB"],
+            "Idioma de transcripción:",
+            [
+                ("es-CL", "🇨🇱 Español Chile"),
+                ("es-ES", "🇪🇸 Español España"),
+                ("es-MX", "🇲🇽 Español México"),
+                ("es-AR", "🇦🇷 Español Argentina"),
+                ("en-US", "🇺🇸 English US"),
+                ("en-GB", "🇬🇧 English UK"),
+            ],
+            format_func=lambda x: x[1],
             index=0
-        )
+        )[0]
         
         st.markdown("---")
         st.header("📊 Estadísticas")
@@ -317,167 +506,132 @@ def main():
             ok = sum(1 for t in st.session_state.transcriptions 
                     if not t['transcription'].startswith('❌'))
             st.metric("Exitosas", ok)
-            st.metric("Con errores", len(st.session_state.transcriptions) - ok)
         
         st.markdown("---")
-        st.header("💡 Tips")
+        st.header("🔧 Debug")
+        st.write(f"WAVs generados: {len(st.session_state.debug_wavs)}")
+        
+        if st.button("🗑️ Limpiar Debug", use_container_width=True):
+            st.session_state.debug_wavs.clear()
+            st.rerun()
+        
+        st.markdown("---")
         st.info("""
-        **✅ Formatos soportados:**
-        • WAV, MP3, FLAC
-        • OGG, Opus (con FFmpeg)
-        • M4A (con FFmpeg)
-        
-        **📱 WhatsApp:**
-        • Archivos PTT soportados
-        • Usa múltiples estrategias
-        • Maneja archivos corruptos
-        
-        **🎯 Mejores resultados:**
-        • Voz clara y audible
-        • Sin música de fondo
-        • Max 10MB por archivo
+        **📋 Esta versión muestra:**
+        - Cada paso del proceso
+        - Información del WAV generado
+        - Permite descargar WAV para verificar
+        - Errores detallados
+        - Estados de las APIs
         """)
-        
-        st.markdown("---")
-        with st.expander("🔧 Información Técnica"):
-            st.code(f"""
-FFmpeg: {'✅' if ffmpeg_ok else '❌'}
-Python: {sys.version.split()[0]}
-Streamlit: {st.__version__}
-            """)
     
     # Main
-    col1, col2 = st.columns([2, 1])
+    st.subheader("📁 Cargar Archivo de Audio")
     
-    with col1:
-        st.subheader("📁 Cargar Audio")
-        
-        files = st.file_uploader(
-            "Arrastra archivos (incluye PTT de WhatsApp)",
-            type=['mp3', 'wav', 'ogg', 'opus', 'oga', 'm4a', 'flac'],
-            accept_multiple_files=True,
-            help="Soporta archivos de WhatsApp y formatos problemáticos"
-        )
-        
-        if files:
-            st.success(f"✅ {len(files)} archivo(s) cargado(s)")
-            with st.expander("📋 Ver archivos", expanded=True):
-                for f in files:
-                    size_mb = f.size / 1024 / 1024
-                    icon = "📱" if 'PTT-' in f.name or 'WA' in f.name else "🎵"
-                    st.write(f"{icon} **{f.name}** ({size_mb:.2f} MB)")
+    uploaded_file = st.file_uploader(
+        "Sube UN archivo para análisis detallado",
+        type=['mp3', 'wav', 'ogg', 'opus', 'oga', 'm4a', 'flac'],
+        help="Sube solo un archivo a la vez para ver el proceso completo"
+    )
     
-    with col2:
-        st.subheader("🎯 Acciones")
+    if uploaded_file:
+        st.success(f"✅ Archivo cargado: {uploaded_file.name}")
+        st.write(f"📊 Tamaño: {uploaded_file.size / 1024:.1f} KB")
         
-        if st.button("🚀 Transcribir", 
-                    type="primary",
-                    disabled=not files or not ffmpeg_ok,
-                    use_container_width=True):
-            process_files(files, language)
-        
-        if not ffmpeg_ok:
-            st.warning("⚠️ FFmpeg requerido")
-        
-        if st.session_state.transcriptions:
-            st.download_button(
-                "📥 Descargar ZIP",
-                create_zip_download(st.session_state.transcriptions),
-                f"transcripciones_{datetime.now():%Y%m%d_%H%M}.zip",
-                "application/zip",
-                use_container_width=True
-            )
-        
-        if st.button("🗑️ Limpiar",
-                    disabled=not st.session_state.transcriptions,
-                    use_container_width=True):
-            st.session_state.transcriptions.clear()
-            st.rerun()
-
-def process_files(files, language):
-    """Procesar archivos con feedback detallado"""
-    progress = st.progress(0)
-    
-    for i, file in enumerate(files):
-        st.markdown(f"### 📄 Procesando {i+1}/{len(files)}: {file.name}")
-        progress.progress((i + 1) / len(files))
-        
-        temp_path = None
-        try:
-            # Guardar temporal
-            suffix = os.path.splitext(file.name)[1] or '.ogg'
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(file.getvalue())
-                temp_path = tmp.name
-            
-            # Transcribir (con feedback interno)
-            text = transcribe_audio(temp_path, language, file.name)
-            
-            # Guardar resultado
-            st.session_state.transcriptions.append({
-                'filename': file.name,
-                'transcription': text,
-                'language': language,
-                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            })
-            
-            # Mostrar resultado inmediato
-            if text.startswith('❌'):
-                st.error(f"Error en {file.name}")
+        if st.button("🚀 Procesar y Transcribir", type="primary", use_container_width=True):
+            if not ffmpeg_ok:
+                st.error("❌ FFmpeg requerido. Agrega 'ffmpeg' a packages.txt y redespliega.")
             else:
-                st.success(f"✅ ¡Transcripción exitosa!")
-                with st.expander("Ver transcripción", expanded=True):
-                    st.write(text)
-            
-        except Exception as e:
-            st.error(f"Error crítico: {str(e)}")
-            st.session_state.transcriptions.append({
-                'filename': file.name,
-                'transcription': f"❌ Error crítico: {str(e)}",
-                'language': language,
-                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            })
-        
-        finally:
-            # Limpiar temporal
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                except:
-                    pass
-        
+                process_single_file(uploaded_file, language)
+    
+    # Mostrar transcripciones anteriores
+    if st.session_state.transcriptions:
         st.markdown("---")
-    
-    # Finalizar
-    progress.empty()
-    
-    successful = sum(1 for t in st.session_state.transcriptions[-len(files):] 
-                    if not t['transcription'].startswith('❌'))
-    
-    if successful == len(files):
-        st.balloons()
-        st.success(f"🎉 ¡{successful} transcripciones completadas!")
-    else:
-        st.warning(f"⚠️ Completado: {successful}/{len(files)} exitosas")
-    
-    # Resumen de resultados
-    st.subheader("📝 Resumen de Resultados")
-    for i, trans in enumerate(st.session_state.transcriptions[-len(files):]):
-        icon = "✅" if not trans['transcription'].startswith('❌') else "❌"
+        st.subheader("📝 Historial de Transcripciones")
         
-        with st.expander(f"{icon} {trans['filename']}", expanded=False):
-            st.text_area(
-                "Transcripción:", 
-                trans['transcription'], 
-                height=150,
-                key=f"result_{len(st.session_state.transcriptions)-len(files)+i}"
-            )
-            st.download_button(
-                "📥 Descargar TXT",
-                trans['transcription'],
-                f"{trans['filename']}.txt",
-                key=f"dl_{len(st.session_state.transcriptions)-len(files)+i}"
-            )
+        for i, trans in enumerate(reversed(st.session_state.transcriptions)):
+            icon = "✅" if not trans['transcription'].startswith('❌') else "❌"
+            
+            with st.expander(f"{icon} {trans['filename']} - {trans['timestamp']}", expanded=False):
+                st.text_area(
+                    "Resultado:", 
+                    trans['transcription'], 
+                    height=150,
+                    key=f"hist_{i}"
+                )
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.download_button(
+                        "📥 Descargar TXT",
+                        trans['transcription'],
+                        f"{trans['filename']}.txt",
+                        key=f"dlhist_{i}"
+                    )
+                
+                with col2:
+                    if trans['filename'] in st.session_state.debug_wavs:
+                        st.download_button(
+                            "🔍 WAV Debug",
+                            st.session_state.debug_wavs[trans['filename']],
+                            f"debug_{trans['filename']}.wav",
+                            "audio/wav",
+                            key=f"wavhist_{i}"
+                        )
+
+def process_single_file(uploaded_file, language):
+    """Procesar un solo archivo con máximo debug"""
+    
+    temp_path = None
+    try:
+        # Guardar temporal
+        suffix = os.path.splitext(uploaded_file.name)[1] or '.ogg'
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(uploaded_file.getvalue())
+            temp_path = tmp.name
+        
+        st.info(f"💾 Archivo guardado temporalmente: {temp_path}")
+        
+        # Transcribir (con debug completo)
+        text = transcribe_audio(temp_path, language, uploaded_file.name)
+        
+        # Guardar resultado
+        st.session_state.transcriptions.append({
+            'filename': uploaded_file.name,
+            'transcription': text,
+            'language': language,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+        
+        # Resultado final
+        st.markdown("---")
+        st.markdown("## 🎉 Proceso Completado")
+        
+        if text.startswith('❌'):
+            st.error("❌ Transcripción falló - revisa los detalles arriba")
+        else:
+            st.balloons()
+            st.success("✅ ¡Transcripción exitosa!")
+        
+    except Exception as e:
+        st.error(f"❌ Error crítico: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
+        
+        st.session_state.transcriptions.append({
+            'filename': uploaded_file.name,
+            'transcription': f"❌ Error crítico: {str(e)}",
+            'language': language,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+    
+    finally:
+        # Limpiar temporal
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
 
 if __name__ == "__main__":
     main()
