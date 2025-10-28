@@ -1,4 +1,3 @@
-streamlit>=1.28.0
-SpeechRecognition>=3.10.0
-pydub>=0.25.1
-pyogg>=0.6.14
+streamlit==1.28.0
+SpeechRecognition==3.10.0
+pydub==0.25.1
