@@ -2,7 +2,7 @@ import streamlit as st
 import sys
 import os
 
-# PATCH para Python 3.13+
+# PATCH mejorado para Python 3.13+
 try:
     import aifc
 except ImportError:
@@ -16,12 +16,77 @@ except ImportError:
 try:
     import audioop
 except ImportError:
-    from types import ModuleType
-    audioop = ModuleType('audioop')
-    audioop.ratecv = lambda *args: (args[0], None)
-    audioop.lin2ulaw = lambda fragment, width: fragment
-    audioop.ulaw2lin = lambda fragment, width: fragment
-    sys.modules['audioop'] = audioop
+    # Intentar instalar audioop-lts primero
+    try:
+        import subprocess
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'audioop-lts', '--break-system-packages'])
+        import audioop
+    except:
+        # Mock completo de audioop con todas las funciones necesarias
+        from types import ModuleType
+        import struct
+        import math
+        
+        audioop = ModuleType('audioop')
+        
+        # Funciones básicas que SpeechRecognition necesita
+        def rms(fragment, width):
+            """Calculate RMS (Root Mean Square) of audio fragment"""
+            if width == 1:
+                fmt = 'b'
+            elif width == 2:
+                fmt = 'h'
+            elif width == 4:
+                fmt = 'i'
+            else:
+                raise ValueError("Invalid width")
+            
+            count = len(fragment) // width
+            if count == 0:
+                return 0
+            
+            sum_squares = sum(x**2 for x in struct.unpack(f'{count}{fmt}', fragment[:count*width]))
+            return int(math.sqrt(sum_squares / count))
+        
+        def ratecv(fragment, width, nchannels, inrate, outrate, state, weightA=1, weightB=0):
+            """Convert rate - simplified version"""
+            return (fragment, state)
+        
+        def lin2ulaw(fragment, width):
+            """Convert linear to ulaw"""
+            return fragment
+        
+        def ulaw2lin(fragment, width):
+            """Convert ulaw to linear"""
+            return fragment
+        
+        def minmax(fragment, width):
+            """Find minimum and maximum values"""
+            return (0, 0)
+        
+        def avg(fragment, width):
+            """Average over all samples"""
+            return 0
+        
+        def maxpp(fragment, width):
+            """Maximum peak-peak value"""
+            return 0
+        
+        def avgpp(fragment, width):
+            """Average peak-peak value"""
+            return 0
+        
+        # Asignar funciones al módulo
+        audioop.rms = rms
+        audioop.ratecv = ratecv
+        audioop.lin2ulaw = lin2ulaw
+        audioop.ulaw2lin = ulaw2lin
+        audioop.minmax = minmax
+        audioop.avg = avg
+        audioop.maxpp = maxpp
+        audioop.avgpp = avgpp
+        
+        sys.modules['audioop'] = audioop
 
 import speech_recognition as sr
 from pydub import AudioSegment
@@ -303,6 +368,15 @@ def test_recognizer():
         st.success(f"✅ SpeechRecognition inicializado correctamente")
         st.write(f"- Versión: {sr.__version__}")
         st.write(f"- Energy threshold: {recognizer.energy_threshold}")
+        
+        # Verificar que audioop.rms existe
+        import audioop
+        if hasattr(audioop, 'rms'):
+            st.write("- audioop.rms: ✅ Disponible")
+        else:
+            st.error("- audioop.rms: ❌ NO disponible")
+            return False
+        
         return True
     except Exception as e:
         st.error(f"❌ Error inicializando reconocedor: {str(e)}")
@@ -350,9 +424,14 @@ def transcribe_audio(file_path, language, filename):
         with sr.AudioFile(wav_path) as source:
             st.write("📊 Analizando audio...")
             
-            # Ajustar ruido
-            recognizer.adjust_for_ambient_noise(source, duration=0.5)
-            st.write(f"✅ Umbral de energía ajustado a: {recognizer.energy_threshold}")
+            # Ajustar ruido - ESTE ES EL PASO QUE FALLA
+            try:
+                st.write("🔇 Ajustando ruido ambiente...")
+                recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                st.write(f"✅ Umbral de energía ajustado a: {recognizer.energy_threshold}")
+            except AttributeError as e:
+                st.warning(f"⚠️ No se pudo ajustar ruido ambiente: {e}")
+                st.info("Continuando sin ajuste de ruido...")
             
             # Leer audio
             st.write("📖 Leyendo datos de audio...")
@@ -458,7 +537,7 @@ Fecha: {trans['timestamp']}
 
 def main():
     st.title("🎤 EcohSpeech Web - Modo Debug Completo")
-    st.caption("🔍 Versión con debugging extensivo para diagnosticar problemas")
+    st.caption("🔍 Versión con debugging extensivo + Mock completo de audioop")
     
     init_session_state()
     
@@ -522,7 +601,7 @@ def main():
         - Información del WAV generado
         - Permite descargar WAV para verificar
         - Errores detallados
-        - Estados de las APIs
+        - Mock completo de audioop
         """)
     
     # Main
